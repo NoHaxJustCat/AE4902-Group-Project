@@ -2,6 +2,10 @@ import serial
 import time
 from influxdb_client import InfluxDBClient, Point
 from influxdb_client.client.write_api import SYNCHRONOUS
+import re
+import argparse
+import threading
+import sys
 
 # Configurazione InfluxDB
 token = "pnAXe3WBVcZ4Vs0KKDKF6Hz576oEih6TY_k18pRRZPZCmH26qzpjfNA0Aw8xn7YuT9eAwWaXBj4jv4H_VsZhqA=="
@@ -14,35 +18,139 @@ url = "http://100.67.220.32:8086/" # O l'indirizzo del cloud
 ser = serial.Serial('COM3', 115200, timeout=1) # Nota: 115200 come nel tuo codice!
 time.sleep(2) # Attesa per reset Arduino
 
-client = InfluxDBClient(url=url, token=token, org=org)
-write_api = client.write_api(write_options=SYNCHRONOUS)
+# ensure serial buffer is clean and request AUTO mode on the device
+try:
+    ser.reset_input_buffer()
+except AttributeError:
+    pass  # older pyserial may not have this
+
+# wait for the boot message (up to ~3s) then send 'a' to enable AUTO mode
+start = time.time()
+while time.time() - start < 3:
+    if ser.in_waiting > 0:
+        line = ser.readline().decode('utf-8', errors='replace').strip()
+        if line:
+            print("Arduino:", line)
+            if "Simulator ready" in line:
+                break
+
+parser = argparse.ArgumentParser(description="Serial reader & controller")
+parser.add_argument("--mode", choices=["simulation", "hardware"], default="simulation",
+                    help="Initial sensor mode")
+parser.add_argument("--scenario", choices=["auto", "normal", "pulse", "spike", "faulty"], default="auto",
+                    help="Initial simulation scenario (use 'normal' to disable AUTO)")
+args = parser.parse_args()
+
+def send_cmd(s):
+    try:
+        ser.write(s.encode('ascii') + b'\n')
+        print("Sent:", s)
+    except Exception as e:
+        print("Failed to send command:", s, e)
+
+# wait for boot message and then send initial commands
+start = time.time()
+while time.time() - start < 3:
+    if ser.in_waiting > 0:
+        line = ser.readline().decode('utf-8', errors='replace').strip()
+        if line:
+            print("Arduino:", line)
+            if "Simulator ready" in line:
+                break
+
+# send initial mode & scenario (you can override with CLI args)
+send_cmd(f"mode {args.mode}")
+send_cmd(f"scenario {args.scenario}")
+
+# start a small background REPL so you can type commands while the script runs
+def repl():
+    print("Interactive: type commands to send to device (e.g. 'mode hardware', 'scenario normal', 'inject 2 0.05 3000').")
+    try:
+        while True:
+            line = input()
+            if not line:
+                continue
+            send_cmd(line)
+    except Exception:
+        pass
+
+t = threading.Thread(target=repl, daemon=True)
+t.start()
+
+# initialize InfluxDB client (graceful fallback)
+write_api = None
+try:
+    client = InfluxDBClient(url=url, token=token, org=org)
+    write_api = client.write_api(write_options=SYNCHRONOUS)
+    print("InfluxDB client ready")
+except Exception as e:
+    write_api = None
+    print("InfluxDB init failed, will skip writes:", e)
+
+float_re = re.compile(r'[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?')
+
+# track device-reported status
+device_mode = None
+device_scenario = None
 
 while True:
     if ser.in_waiting > 0:
-        line = ser.readline().decode('utf-8').strip()
-        parts = line.split(',')
-        
-        if len(parts) == 11: # Assicurati che ci siano tutti i campi
-            try:
-                # Conversione di tutti i valori in float
-                d = [float(x) for x in parts]
-                
-                point = Point("battery_analysis") \
-                    .tag("device", "arduino_uno") \
-                    .field("temp1", d[0]) \
-                    .field("temp2", d[1]) \
-                    .field("temp3", d[2]) \
-                    .field("voltage", d[3]) \
-                    .field("current", d[4]) \
-                    .field("avg_temp", d[5]) \
-                    .field("i_mean_all", d[6]) \
-                    .field("v_mean_all", d[7]) \
-                    .field("i_v_ratio_10", d[8]) \
-                    .field("power_mean_10", d[9]) \
-                    .field("power_prev", d[10])
+        line = ser.readline().decode('utf-8', errors='replace').strip()
+        if not line:
+            continue
 
+        # textual status / logs
+        if line.startswith("Sensor mode:"):
+            device_mode = line.split(":", 1)[1].strip()
+            print("Device:", line)
+            continue
+        if line.startswith("Sim:"):
+            device_scenario = line.split(":", 1)[1].strip()
+            print("Device:", line)
+            continue
+        if line.startswith("Simulator ready"):
+            print(line)
+            continue
+
+        # DATA lines (preferred) or any line with >=11 floats
+        d = None
+        if line.upper().startswith("DATA"):
+            parts = [p.strip() for p in line.split(",")]
+            tokens = parts[1:] if parts[0].upper().startswith("DATA") else parts
+            if len(tokens) >= 11:
+                try:
+                    d = [float(x) for x in tokens[:11]]
+                except ValueError:
+                    d = None
+
+        if d is None:
+            nums = float_re.findall(line)
+            if len(nums) >= 11:
+                d = [float(x) for x in nums[:11]]
+            else:
+                print("Log:", line)
+                continue
+
+        try:
+            point = Point("battery_analysis") \
+                .tag("device", "arduino_uno") \
+                .field("temp1", d[0]) \
+                .field("temp2", d[1]) \
+                .field("temp3", d[2]) \
+                .field("voltage", d[3]) \
+                .field("current", d[4]) \
+                .field("avg_temp", d[5]) \
+                .field("i_mean_all", d[6]) \
+                .field("v_mean_all", d[7]) \
+                .field("i_v_ratio_10", d[8]) \
+                .field("power_mean_10", d[9]) \
+                .field("power_prev", d[10])
+
+            if write_api:
                 write_api.write(bucket=bucket, org=org, record=point)
-                print("Dati inviati con successo")
-                
-            except ValueError:
-                print(f"Errore conversione: {line}")
+                print("Data written to InfluxDB")
+            else:
+                print("Readings:", d)
+
+        except Exception as e:
+            print("Failed processing line:", line, e)
