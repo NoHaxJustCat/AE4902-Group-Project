@@ -13,6 +13,7 @@ struct Features {
     float time;
     float capacity;
     float temperature;
+    float voted_temperature; // decided via triple-redundancy voter (average of two nearest)
     float i_mean_all;
     float i_v_ratio_10;
     float v_mean_all;
@@ -38,6 +39,9 @@ void simInjectSpike(float amplitude, unsigned long duration_ms);
 
 // Automatic / probabilistic event parameters (probabilities are per-second)
 void setAutoProbabilities(float spikeProbPerSec, float faultProbPerSec, float glitchProbPerSec, float pulseProbPerSec);
+
+// Per-sensor automatic event probabilities (sensorIndex: 0..4)
+void setPerSensorAutoProbabilities(int sensorIndex, float spikeProbPerSec, float faultProbPerSec, float glitchProbPerSec, float pulseProbPerSec);
 
 // per-sensor injection helper (sensorIndex: 0=temp1,1=temp2,2=temp3,3=voltage,4=current)
 void simInjectSensorSpike(int sensorIndex, float amplitude, unsigned long duration_ms);

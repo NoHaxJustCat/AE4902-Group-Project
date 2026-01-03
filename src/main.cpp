@@ -1,6 +1,9 @@
 #include <Arduino.h>
 #include <sensors.h>
+#include "faults.h"
 
+// --- Main application code ---
+// define global/static variables for main, readings array
 static unsigned long sampling_period = 0;
 SensorReadings readingsArray[10] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
 int index = 0;
@@ -8,17 +11,44 @@ static Features lastFeatures = {0};              // store previous features acro
 static String cmdBuffer; // buffer for incoming serial text lines
 
 void setup() {
+  // initialize Serial
   Serial.begin(115200);
   while (!Serial && millis() < 2000) {} // brief wait for Serial on some boards
 
+  // seed RNG (simulation uses its own RNG)
   randomSeed(analogRead(A0)); // seed RNG from floating analog pin
   initSensorSimulator(analogRead(A0) ^ (unsigned long)micros()); // deterministic-ish seed for sim
-  setSensorMode(SENSOR_MODE_SIMULATION); // default to simulation
-  setSimulationScenario(SIM_AUTO); // start in automatic probabilistic mode by default
-  Serial.println("Simulator ready. Default: AUTO mode. Commands:");
-  Serial.println("  m - toggle sensor mode (simulation/hardware)");
-  Serial.println("  a - enable AUTO (random faults/spikes/pulses)");
-  Serial.println("Simulation controls (when in sim mode): n=normal p=pulse s=spike f=fault x=inject spike");
+
+  // HARD-CODED MODE: choose simulation or hardware readings here (no console toggles)
+  static const bool kUseSimulation = true; // <-- set to `false` to use hardware ADC reads
+  setSensorMode(kUseSimulation ? SENSOR_MODE_SIMULATION : SENSOR_MODE_HARDWARE);
+
+  // Fault modes (hardcoded): perfect vs faulty (probabilities per-sensor)
+  static const bool kFaultyMode = false; // set to `false` for perfect (no auto faults)
+
+  // Example per-sensor probabilities (for 5 sensors: temp1,temp2,temp3,voltage,current)
+  // Values are probabilities per second for each event type when in SIM_AUTO
+  static const float per_spike_prob[5] = {0.02f, 0.02f, 0.02f, 0.01f, 0.015f};
+  static const float per_fault_prob[5] = {0.001f, 0.001f, 0.001f, 0.0005f, 0.0007f};
+  static const float per_glitch_prob[5] = {0.005f, 0.005f, 0.005f, 0.003f, 0.004f};
+  static const float per_pulse_prob[5] = {0.002f, 0.002f, 0.002f, 0.001f, 0.0015f};
+
+  // Configure simulator/system-level and per-sensor probabilities depending on mode
+  if (kUseSimulation) {
+    setSimulationScenario(SIM_AUTO);
+    if (kFaultyMode) {
+      // keep some system-level background probabilities (minor)
+      setAutoProbabilities(0.002f, 0.001f, 0.0005f, 0.005f);
+      for (int s = 0; s < 5; ++s) setPerSensorAutoProbabilities(s, per_spike_prob[s], per_fault_prob[s], per_glitch_prob[s], per_pulse_prob[s]);
+    } else {
+      // perfect simulation: disable all auto events
+      setAutoProbabilities(0.0f, 0.0f, 0.0f, 0.0f);
+      for (int s = 0; s < 5; ++s) setPerSensorAutoProbabilities(s, 0.0f, 0.0f, 0.0f, 0.0f);
+    }
+  }
+
+  Serial.print("Starting: "); Serial.println(kUseSimulation ? (kFaultyMode ? "SIMULATION (FAULTY)" : "SIMULATION (PERFECT)") : "HARDWARE (hardcoded)");
+  Serial.println("Console controls for switching modes/scenarios have been removed. Use code to change mode.");
 
   int sampling_freq = 1; // Hz
   sampling_period = 1000UL / sampling_freq; // ms
@@ -43,75 +73,9 @@ static void processSerialLine(String line) {
   line.trim();
   if (line.length() == 0) return;
 
-  // legacy single-char commands
-  if (line.length() == 1) {
-    char c = line.charAt(0);
-    if (c == 'm') {
-      if (getSensorMode() == SENSOR_MODE_SIMULATION) {
-        setSensorMode(SENSOR_MODE_HARDWARE);
-        Serial.println("Sensor mode: HARDWARE (reading analog pins)");
-      } else {
-        setSensorMode(SENSOR_MODE_SIMULATION);
-        Serial.println("Sensor mode: SIMULATION");
-      }
-      return;
-    } else if (c == 'a') { setSimulationScenario(SIM_AUTO); Serial.println("Sim: AUTO (probabilistic events enabled)"); return; }
-    else if (c == 'p') { setSimulationScenario(SIM_PULSE); Serial.println("Sim: PULSE"); return; }
-    else if (c == 'n') { setSimulationScenario(SIM_NORMAL); Serial.println("Sim: NORMAL"); return; }
-    else if (c == 's') { setSimulationScenario(SIM_SPIKE); Serial.println("Sim: SPIKE"); return; }
-    else if (c == 'f') { setSimulationScenario(SIM_FAULTY); Serial.println("Sim: FAULTY"); return; }
-    else if (c == 'x') { simInjectSpike(0.05f, 3000); Serial.println("Injected spike"); return; }
-    // unknown single-char => fall-through to message below
-  }
-
-  // robust textual commands (case-insensitive)
-  String cmd = line;
-  cmd.toLowerCase();
-
-  if (cmd.startsWith("mode ")) {
-    String val = cmd.substring(5); val.trim();
-    if (val.startsWith("sim")) { setSensorMode(SENSOR_MODE_SIMULATION); Serial.println("Sensor mode: SIMULATION"); }
-    else if (val.startsWith("hw") || val.startsWith("hard")) { setSensorMode(SENSOR_MODE_HARDWARE); Serial.println("Sensor mode: HARDWARE"); }
-    else { Serial.print("Unknown mode: "); Serial.println(val); }
-    return;
-  }
-
-  if (cmd.startsWith("scenario ")) {
-    String val = cmd.substring(9); val.trim();
-    if (val.startsWith("auto")) { setSimulationScenario(SIM_AUTO); Serial.println("Sim: AUTO"); }
-    else if (val.startsWith("normal")) { setSimulationScenario(SIM_NORMAL); Serial.println("Sim: NORMAL"); }
-    else if (val.startsWith("pulse")) { setSimulationScenario(SIM_PULSE); Serial.println("Sim: PULSE"); }
-    else if (val.startsWith("spike")) { setSimulationScenario(SIM_SPIKE); Serial.println("Sim: SPIKE"); }
-    else if (val.startsWith("fault") || val.startsWith("faulty")) { setSimulationScenario(SIM_FAULTY); Serial.println("Sim: FAULTY"); }
-    else { Serial.print("Unknown scenario: "); Serial.println(val); }
-    return;
-  }
-
-  if (cmd.startsWith("auto ")) {
-    String val = cmd.substring(5); val.trim();
-    if (val.startsWith("on")) { setSimulationScenario(SIM_AUTO); Serial.println("Sim: AUTO"); return; }
-    else if (val.startsWith("off")) { setSimulationScenario(SIM_NORMAL); Serial.println("Sim: NORMAL"); return; }
-  }
-
-  // inject [sensorIndex] [amp] [duration_ms]  OR  inject spike [amp] [duration_ms]
-  if (cmd.startsWith("inject")) {
-    char buf[120];
-    cmd.toCharArray(buf, sizeof(buf));
-    int sindex; float amp; unsigned long dur;
-    if (sscanf(buf, "inject %d %f %lu", &sindex, &amp, &dur) == 3) {
-      simInjectSensorSpike(sindex, amp, dur);
-      Serial.print("Injected sensor spike: idx="); Serial.print(sindex);
-      Serial.print(" amp="); Serial.print(amp); Serial.print(" dur="); Serial.println(dur);
-      return;
-    }
-    if (sscanf(buf, "inject spike %f %lu", &amp, &dur) == 2) {
-      simInjectSpike(amp, dur);
-      Serial.print("Injected global spike amp="); Serial.print(amp); Serial.print(" dur="); Serial.println(dur);
-      return;
-    }
-    Serial.print("Could not parse inject command: "); Serial.println(line);
-    return;
-  }
+  // Note: interactive simulation/scenario/fault commands removed.
+  // Only minimal console support remains (e.g., 'status').
+  String cmd = line; cmd.toLowerCase();
 
   if (cmd.equals("status")) {
     Serial.print("Sensor mode: "); Serial.println(modeToString(getSensorMode()));
@@ -119,23 +83,60 @@ static void processSerialLine(String line) {
     return;
   }
 
+  // Fault commands removed from console (use programmatic APIs).
+
   Serial.print("Unknown command: "); Serial.println(line);
 }
 
-float computeArrayMean(float arr[], int size) {
-  if (size <= 0) return 0.0f;            // avoid divide-by-zero / invalid means
-  float sum = 0.0f;
-  for (int i = 0; i < size; ++i) {
-    sum += arr[i];
+#include "utils.h" // computeArrayMean and helpers
+// Enable on-device ML prediction only when explicitly requested via build flag:
+#ifdef USE_RF_ON_DEVICE
+#include "capacity_calculator.h"
+#if defined(__AVR__) && (defined(ARDUINO_AVR_UNO) || defined(__AVR_ATmega328P__))
+#warning "USE_RF_ON_DEVICE on AVR Uno may overflow flash. Prefer host-side prediction or bigger board."
+#endif
+#endif
+
+// Simple capacity calculator: if we have a previous capacity value, return it;
+// otherwise estimate capacity from measured voltage (assumes nominal full voltage ~= 4.2V).
+static float calculateCapacity(SensorReadings readings[], Features oldFeatures, int i) {
+  // base estimate (previous value or voltage-based)
+  float cap_base = 0.0f;
+  if (oldFeatures.count_all > 0) {
+    cap_base = oldFeatures.capacity;
+  } else {
+    float v = readings[0].voltage;
+    if (v <= 0.0f) cap_base = 0.0f;
+    else cap_base = (v / 4.2f) * 100.0f;
   }
-  return sum / size;
+
+#ifdef USE_RF_ON_DEVICE
+  // prepare feature vector: Time, capacity (base), I_mean_all, Temperature_measured
+  float t = millis() / 1000.0f;
+  float i_mean_all = (oldFeatures.count_all > 0) ? oldFeatures.i_mean_all : readings[0].current;
+  float temp_meas = (readings[0].temp1 + readings[0].temp2 + readings[0].temp3) / 3.0f;
+  Eloquent::ML::Port::RandomForestRegressor rf;
+  float x[4] = { t, cap_base, i_mean_all, temp_meas };
+  float cap_pred = rf.predict(x);
+  if (cap_pred < 0.0f) cap_pred = 0.0f;
+  if (cap_pred > 100.0f) cap_pred = 100.0f;
+  return cap_pred;
+#else
+  // fallback, unchanged behavior
+  if (cap_base < 0.0f) cap_base = 0.0f;
+  if (cap_base > 100.0f) cap_base = 100.0f;
+  return cap_base;
+#endif
 }
 
 Features getFeatures(SensorReadings readingsArray[], Features oldFeatures, int i) {
   Features features;
   features.time = millis() / 1000.0f;
-  features.capacity = 100.0f;
+  // compute capacity using capacity calculator (replace with real signature if different)
+  features.capacity = calculateCapacity(readingsArray, oldFeatures, i);
   features.temperature = (readingsArray[0].temp1 + readingsArray[0].temp2 + readingsArray[0].temp3) / 3.0f;
+  // decide voted temperature using triple redundancy voter (average of the two closest temps)
+  features.voted_temperature = votedTemperature(readingsArray[0].temp1, readingsArray[0].temp2, readingsArray[0].temp3);
 
   int prev_count = (i > 0) ? i : 0;      // treat negative/zero i as "no previous samples"
   int new_count = prev_count + 1;
@@ -172,6 +173,8 @@ Features getFeatures(SensorReadings readingsArray[], Features oldFeatures, int i
   return features;
 }
 
+// ML prediction removed from device (run on host instead if needed)
+
 void loop() {
   // read incoming serial lines non-blocking and process them
   while (Serial.available()) {
@@ -199,9 +202,10 @@ void loop() {
     // pass lastFeatures (zero-initialized on first call)
     Features f = getFeatures(readingsArray, lastFeatures, index);
 
+    // print a single DATA line (serialPrintReadings already includes capacity)
     serialPrintReadings(r, f);
-    
-    lastFeatures = f;   // save for next iteration
-    ++index;            // increment sample counter AFTER using it
-  }
-}
+ 
+     lastFeatures = f;   // save for next iteration
+     ++index;            // increment sample counter AFTER using it
+   }
+ }

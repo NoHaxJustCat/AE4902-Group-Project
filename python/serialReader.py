@@ -24,21 +24,18 @@ try:
 except AttributeError:
     pass  # older pyserial may not have this
 
-# wait for the boot message (up to ~3s) then send 'a' to enable AUTO mode
+# wait for the boot message (up to ~3s)
 start = time.time()
 while time.time() - start < 3:
     if ser.in_waiting > 0:
         line = ser.readline().decode('utf-8', errors='replace').strip()
         if line:
             print("Arduino:", line)
-            if "Simulator ready" in line:
+            if "Starting:" in line or "Simulator ready" in line:
                 break
 
-parser = argparse.ArgumentParser(description="Serial reader & controller")
-parser.add_argument("--mode", choices=["simulation", "hardware"], default="simulation",
-                    help="Initial sensor mode")
-parser.add_argument("--scenario", choices=["auto", "normal", "pulse", "spike", "faulty"], default="auto",
-                    help="Initial simulation scenario (use 'normal' to disable AUTO)")
+parser = argparse.ArgumentParser(description="Serial reader (device mode is hardcoded on device)")
+parser.add_argument("--status", action="store_true", help="Request device status once on startup")
 args = parser.parse_args()
 
 def send_cmd(s):
@@ -58,19 +55,22 @@ while time.time() - start < 3:
             if "Simulator ready" in line:
                 break
 
-# send initial mode & scenario (you can override with CLI args)
-send_cmd(f"mode {args.mode}")
-send_cmd(f"scenario {args.scenario}")
+# Device mode is hardcoded on the device; optionally request status once
+if args.status:
+    send_cmd("status")
 
 # start a small background REPL so you can type commands while the script runs
 def repl():
-    print("Interactive: type commands to send to device (e.g. 'mode hardware', 'scenario normal', 'inject 2 0.05 3000').")
+    print("Interactive: only 'status' is supported (type 'status' to request device status). Type Ctrl-C to quit.")
     try:
         while True:
-            line = input()
+            line = input().strip()
             if not line:
                 continue
-            send_cmd(line)
+            if line.lower() == 'status':
+                send_cmd('status')
+            else:
+                print("Only 'status' is supported. (Other commands are disabled; mode is hardcoded on device.)")
     except Exception:
         pass
 
@@ -117,16 +117,16 @@ while True:
         if line.upper().startswith("DATA"):
             parts = [p.strip() for p in line.split(",")]
             tokens = parts[1:] if parts[0].upper().startswith("DATA") else parts
-            if len(tokens) >= 11:
+            if len(tokens) >= 13:
                 try:
-                    d = [float(x) for x in tokens[:11]]
+                    d = [float(x) for x in tokens[:13]]
                 except ValueError:
                     d = None
 
         if d is None:
             nums = float_re.findall(line)
-            if len(nums) >= 11:
-                d = [float(x) for x in nums[:11]]
+            if len(nums) >= 13:
+                d = [float(x) for x in nums[:13]]
             else:
                 print("Log:", line)
                 continue
@@ -140,11 +140,13 @@ while True:
                 .field("voltage", d[3]) \
                 .field("current", d[4]) \
                 .field("avg_temp", d[5]) \
-                .field("i_mean_all", d[6]) \
-                .field("v_mean_all", d[7]) \
-                .field("i_v_ratio_10", d[8]) \
-                .field("power_mean_10", d[9]) \
-                .field("power_prev", d[10])
+                .field("voted_temp", d[6]) \
+                .field("i_mean_all", d[7]) \
+                .field("v_mean_all", d[8]) \
+                .field("i_v_ratio_10", d[9]) \
+                .field("power_mean_10", d[10]) \
+                .field("power_prev", d[11]) \
+                .field("capacity", d[12])
 
             if write_api:
                 write_api.write(bucket=bucket, org=org, record=point)
