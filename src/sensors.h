@@ -24,27 +24,8 @@ struct Features {
 };
 
 // New enums for mode / scenarios
-enum SensorMode { SENSOR_MODE_SIMULATION = 0, SENSOR_MODE_HARDWARE = 1 };
-enum SimScenario { SIM_NORMAL = 0, SIM_PULSE = 1, SIM_SPIKE = 2, SIM_FAULTY = 3, SIM_AUTO = 4 };
 
-SensorReadings getSensorsReadings();
-float whiteNoise(float mean, float stddev);
-
-// Simulation control / configuration
-void initSensorSimulator(uint32_t seed = 0);
-void setSensorMode(SensorMode mode);
-SensorMode getSensorMode();
-void setSimulationScenario(SimScenario s);
-void simInjectSpike(float amplitude, unsigned long duration_ms);
-
-// Automatic / probabilistic event parameters (probabilities are per-second)
-void setAutoProbabilities(float spikeProbPerSec, float faultProbPerSec, float glitchProbPerSec, float pulseProbPerSec);
-
-// Per-sensor automatic event probabilities (sensorIndex: 0..4)
-void setPerSensorAutoProbabilities(int sensorIndex, float spikeProbPerSec, float faultProbPerSec, float glitchProbPerSec, float pulseProbPerSec);
-
-// per-sensor injection helper (sensorIndex: 0=temp1,1=temp2,2=temp3,3=voltage,4=current)
-void simInjectSensorSpike(int sensorIndex, float amplitude, unsigned long duration_ms);
+SensorReadings getHardwareReadings();
 
 // Hardware mapping helpers (defaults are A0..A4)
 void setAnalogPins(uint8_t temp1Pin, uint8_t temp2Pin, uint8_t temp3Pin, uint8_t voltagePin, uint8_t currentPin);
@@ -56,6 +37,3 @@ void setCurrentScaling(float scale);
 Features getFeatures(SensorReadings readingsArray[], Features oldFeatures, int i);
 
 void serialPrintReadings(SensorReadings r, Features f);
-
-// helpers
-SimScenario getSimulationScenario(); // new: query current simulation scenario

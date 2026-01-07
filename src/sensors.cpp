@@ -1,6 +1,8 @@
 #include <math.h>
 #include <Arduino.h>
 #include "sensors.h"
+#include "sensors_hardware.h"
+#include "utils.h"
 
 // --- configurable hardware mapping & ADC params ---
 static uint8_t g_pin_temp1 = A0;
@@ -12,17 +14,6 @@ static float g_adc_vref = 3.3f;
 static int g_adc_resolution = 1024; // supply (use 1024 for 10-bit boards => raw in [0..1023])
 static float g_voltage_scale = 1.0f; // divider/mapping to real voltage
 static float g_current_scale = 1.0f; // mapping from ADC voltage to current
-
-// current sensor/hardware mode flag
-static SensorMode g_sensorMode = SENSOR_MODE_SIMULATION;
-
-// Simulator implementation moved to separate module
-#include "sensors_simulator.h"
-
-// Hardware and fault modules are in their own files
-#include "sensors_hardware.h"
-#include "faults.h"
-#include "utils.h"
 
 // --- hardware helpers ---
 static inline float analogToVoltage(int raw) {
@@ -49,17 +40,6 @@ static float readCurrentFromAnalog(uint8_t pin) {
   return v * g_current_scale; // user can calibrate
 }
 
-// --- API implementations ---
-SensorReadings getSensorsReadings() {
-  SensorReadings s = (g_sensorMode == SENSOR_MODE_SIMULATION) ? getSimulatorReadings() : getHardwareReadings();
-
-  // allow faults to be applied by the faults module (in-place)
-  applyFaults(s);
-  return s;
-}
-
-void setSensorMode(SensorMode mode) { g_sensorMode = mode; }
-SensorMode getSensorMode() { return g_sensorMode; }
 
 void serialPrintReadings(SensorReadings r, Features f) {
     Serial.print("DATA,");

@@ -1,6 +1,8 @@
 #include <Arduino.h>
-#include <sensors.h>
-#include "faults.h"
+#include "sensors.h"
+#include "sensors_hardware.h"
+#include "random_forest_compact.h"  // Compact PROGMEM version (~2KB vs 67KB)
+#include "utils.h"
 
 // --- Main application code ---
 // define global/static variables for main, readings array
@@ -15,59 +17,12 @@ void setup() {
   Serial.begin(115200);
   while (!Serial && millis() < 2000) {} // brief wait for Serial on some boards
 
-  // seed RNG (simulation uses its own RNG)
-  randomSeed(analogRead(A0)); // seed RNG from floating analog pin
-  initSensorSimulator(analogRead(A0) ^ (unsigned long)micros()); // deterministic-ish seed for sim
-
-  // HARD-CODED MODE: choose simulation or hardware readings here (no console toggles)
-  static const bool kUseSimulation = true; // <-- set to `false` to use hardware ADC reads
-  setSensorMode(kUseSimulation ? SENSOR_MODE_SIMULATION : SENSOR_MODE_HARDWARE);
-
-  // Fault modes (hardcoded): perfect vs faulty (probabilities per-sensor)
-  static const bool kFaultyMode = false; // set to `false` for perfect (no auto faults)
-
-  // Example per-sensor probabilities (for 5 sensors: temp1,temp2,temp3,voltage,current)
-  // Values are probabilities per second for each event type when in SIM_AUTO
-  static const float per_spike_prob[5] = {0.02f, 0.02f, 0.02f, 0.01f, 0.015f};
-  static const float per_fault_prob[5] = {0.001f, 0.001f, 0.001f, 0.0005f, 0.0007f};
-  static const float per_glitch_prob[5] = {0.005f, 0.005f, 0.005f, 0.003f, 0.004f};
-  static const float per_pulse_prob[5] = {0.002f, 0.002f, 0.002f, 0.001f, 0.0015f};
-
-  // Configure simulator/system-level and per-sensor probabilities depending on mode
-  if (kUseSimulation) {
-    setSimulationScenario(SIM_AUTO);
-    if (kFaultyMode) {
-      // keep some system-level background probabilities (minor)
-      setAutoProbabilities(0.002f, 0.001f, 0.0005f, 0.005f);
-      for (int s = 0; s < 5; ++s) setPerSensorAutoProbabilities(s, per_spike_prob[s], per_fault_prob[s], per_glitch_prob[s], per_pulse_prob[s]);
-    } else {
-      // perfect simulation: disable all auto events
-      setAutoProbabilities(0.0f, 0.0f, 0.0f, 0.0f);
-      for (int s = 0; s < 5; ++s) setPerSensorAutoProbabilities(s, 0.0f, 0.0f, 0.0f, 0.0f);
-    }
-  }
-
-  Serial.print("Starting: "); Serial.println(kUseSimulation ? (kFaultyMode ? "SIMULATION (FAULTY)" : "SIMULATION (PERFECT)") : "HARDWARE (hardcoded)");
   Serial.println("Console controls for switching modes/scenarios have been removed. Use code to change mode.");
 
   int sampling_freq = 1; // Hz
   sampling_period = 1000UL / sampling_freq; // ms
 }
 
-static const char* scenarioToString(SimScenario s) {
-  switch (s) {
-    case SIM_NORMAL: return "NORMAL";
-    case SIM_PULSE:  return "PULSE";
-    case SIM_SPIKE:  return "SPIKE";
-    case SIM_FAULTY: return "FAULTY";
-    case SIM_AUTO:   return "AUTO";
-    default: return "UNKNOWN";
-  }
-}
-
-static const char* modeToString(SensorMode m) {
-  return (m == SENSOR_MODE_HARDWARE) ? "HARDWARE" : "SIMULATION";
-}
 
 static void processSerialLine(String line) {
   line.trim();
@@ -77,56 +32,39 @@ static void processSerialLine(String line) {
   // Only minimal console support remains (e.g., 'status').
   String cmd = line; cmd.toLowerCase();
 
-  if (cmd.equals("status")) {
-    Serial.print("Sensor mode: "); Serial.println(modeToString(getSensorMode()));
-    Serial.print("Simulation scenario: "); Serial.println(scenarioToString(getSimulationScenario()));
-    return;
-  }
-
   // Fault commands removed from console (use programmatic APIs).
 
   Serial.print("Unknown command: "); Serial.println(line);
 }
 
-#include "utils.h" // computeArrayMean and helpers
 // Enable on-device ML prediction only when explicitly requested via build flag:
 #ifdef USE_RF_ON_DEVICE
-#include "capacity_calculator.h"
 #if defined(__AVR__) && (defined(ARDUINO_AVR_UNO) || defined(__AVR_ATmega328P__))
 #warning "USE_RF_ON_DEVICE on AVR Uno may overflow flash. Prefer host-side prediction or bigger board."
 #endif
 #endif
 
-// Simple capacity calculator: if we have a previous capacity value, return it;
-// otherwise estimate capacity from measured voltage (assumes nominal full voltage ~= 4.2V).
+// Simple capacity calculator using compact Random Forest
 static float calculateCapacity(SensorReadings readings[], Features oldFeatures, int i) {
-  // base estimate (previous value or voltage-based)
   float cap_base = 0.0f;
   if (oldFeatures.count_all > 0) {
     cap_base = oldFeatures.capacity;
   } else {
-    float v = readings[0].voltage;
-    if (v <= 0.0f) cap_base = 0.0f;
-    else cap_base = (v / 4.2f) * 100.0f;
+    cap_base = (readings[0].voltage / 4.2f) * 100.0f;
   }
-
-#ifdef USE_RF_ON_DEVICE
-  // prepare feature vector: Time, capacity (base), I_mean_all, Temperature_measured
+  
+  // Features: [time, capacity_base, temperature, i_mean_all]
   float t = millis() / 1000.0f;
   float i_mean_all = (oldFeatures.count_all > 0) ? oldFeatures.i_mean_all : readings[0].current;
   float temp_meas = (readings[0].temp1 + readings[0].temp2 + readings[0].temp3) / 3.0f;
-  Eloquent::ML::Port::RandomForestRegressor rf;
-  float x[4] = { t, cap_base, i_mean_all, temp_meas };
+  
+  RandomForestCompact rf;
+  float x[4] = { t, cap_base, temp_meas, i_mean_all };
   float cap_pred = rf.predict(x);
+  
   if (cap_pred < 0.0f) cap_pred = 0.0f;
   if (cap_pred > 100.0f) cap_pred = 100.0f;
   return cap_pred;
-#else
-  // fallback, unchanged behavior
-  if (cap_base < 0.0f) cap_base = 0.0f;
-  if (cap_base > 100.0f) cap_base = 100.0f;
-  return cap_base;
-#endif
 }
 
 Features getFeatures(SensorReadings readingsArray[], Features oldFeatures, int i) {
@@ -195,7 +133,7 @@ void loop() {
   unsigned long now = millis();
   if (now - last >= sampling_period) {
     last = now;
-    SensorReadings r = getSensorsReadings();
+    SensorReadings r = getHardwareReadings();
     for (int i = 9; i > 0; --i) readingsArray[i] = readingsArray[i - 1];
     readingsArray[0] = r;
 
