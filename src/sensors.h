@@ -23,11 +23,13 @@ struct Features {
     float i_v_ratio;
 };
 
-// New enums for mode / scenarios
+// Hardware initialization
+void initSensors();
 
+// Hardware reading
 SensorReadings getHardwareReadings();
 
-// Hardware mapping helpers (defaults are A0..A4)
+// Hardware mapping helpers (kept for API compatibility - not used with INA219/TMP36)
 void setAnalogPins(uint8_t temp1Pin, uint8_t temp2Pin, uint8_t temp3Pin, uint8_t voltagePin, uint8_t currentPin);
 void setADCParameters(float vref, int resolution);
 void setVoltageScaling(float scale);
@@ -35,5 +37,4 @@ void setCurrentScaling(float scale);
 
 // make getFeatures visible to other translation units
 Features getFeatures(SensorReadings readingsArray[], Features oldFeatures, int i);
-
 void serialPrintReadings(SensorReadings r, Features f);

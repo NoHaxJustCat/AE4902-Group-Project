@@ -1,60 +1,106 @@
 #include <math.h>
 #include <Arduino.h>
+#include <Wire.h>
+#include <Adafruit_INA219.h>
 #include "sensors.h"
-#include "sensors_hardware.h"
 #include "utils.h"
 
-// --- configurable hardware mapping & ADC params ---
-static uint8_t g_pin_temp1 = A0;
-static uint8_t g_pin_temp2 = A1;
-static uint8_t g_pin_temp3 = A2;
-static uint8_t g_pin_voltage = A3;
-static uint8_t g_pin_current = A4;
-static float g_adc_vref = 3.3f;
-static int g_adc_resolution = 1024; // supply (use 1024 for 10-bit boards => raw in [0..1023])
-static float g_voltage_scale = 1.0f; // divider/mapping to real voltage
-static float g_current_scale = 1.0f; // mapping from ADC voltage to current
+// --- Hardware objects ---
+static Adafruit_INA219 ina219;
+static bool inaOk = false;
 
-// --- hardware helpers ---
-static inline float analogToVoltage(int raw) {
-  int maxRaw = (g_adc_resolution > 1) ? (g_adc_resolution - 1) : 1023;
-  return (raw / (float)maxRaw) * g_adc_vref;
+// --- Pin definitions for temperature sensors ---
+static const uint8_t tempPin1 = A1;
+static const uint8_t tempPin2 = A2;
+static const uint8_t tempPin3 = A3;
+
+// --- Helper function for averaged current reading ---
+static float getAverageCurrent(uint8_t samples = 10) {
+  if (!inaOk) return 0.0f;
+  float sum = 0;
+  for (uint8_t i = 0; i < samples; i++) {
+    sum += ina219.getCurrent_mA();
+    delay(5);
+  }
+  return sum / samples;
 }
 
-static float readTempFromAnalog(uint8_t pin) {
-  // Default mapping: LM35-like (10 mV/°C). Adjust with calibration as needed.
+// --- Temperature reading from TMP36 sensor ---
+static float readTMP36(uint8_t pin) {
   int raw = analogRead(pin);
-  float v = analogToVoltage(raw);
-  return v * 100.0f; // 0.01 V/°C => multiply by 100
+  float voltage = raw * (5.0 / 1023.0);  // Convert to voltage (5V reference)
+  float temperatureC = (voltage - 0.5) * 100.0;  // TMP36 formula
+  return temperatureC;
 }
 
-static float readVoltageFromAnalog(uint8_t pin) {
-  int raw = analogRead(pin);
-  float v = analogToVoltage(raw) * g_voltage_scale;
-  return v;
+// --- Initialize hardware sensors ---
+void initSensors() {
+  Wire.begin();
+  
+  inaOk = ina219.begin();
+  
+  if (!inaOk) {
+    Serial.println("ERROR: INA219 not detected. Check wiring and I2C address.");
+  } else {
+    ina219.setCalibration_16V_400mA();
+    Serial.println("INA219 Initialized (16V/400mA Range)");
+  }
 }
 
-static float readCurrentFromAnalog(uint8_t pin) {
-  int raw = analogRead(pin);
-  float v = analogToVoltage(raw);
-  return v * g_current_scale; // user can calibrate
+// --- Main hardware reading function ---
+SensorReadings getHardwareReadings() {
+  SensorReadings r;
+  
+  // Read three TMP36 temperature sensors
+  r.temp1 = readTMP36(tempPin1);  // A1
+  r.temp2 = readTMP36(tempPin2);  // A2
+  r.temp3 = readTMP36(tempPin3);  // A3
+  
+  // Read voltage and current from INA219
+  if (inaOk) {
+    r.voltage = ina219.getBusVoltage_V();           // Voltage in Volts
+    r.current = getAverageCurrent(10) / 1000.0f;    // Current in Amperes (converted from mA)
+  } else {
+    r.voltage = 0.0f;
+    r.current = 0.0f;
+  }
+  
+  return r;
 }
 
+// --- Stub functions (kept for API compatibility, do nothing) ---
+void setAnalogPins(uint8_t temp1Pin, uint8_t temp2Pin, uint8_t temp3Pin, 
+                   uint8_t voltagePin, uint8_t currentPin) {
+  // Not used with hardware sensors
+}
 
+void setADCParameters(float vref, int resolution) {
+  // Not used with hardware sensors
+}
+
+void setVoltageScaling(float scale) {
+  // Not used with hardware sensors
+}
+
+void setCurrentScaling(float scale) {
+  // Not used with hardware sensors
+}
+
+// --- Serial output function ---
 void serialPrintReadings(SensorReadings r, Features f) {
-    Serial.print("DATA,");
-    const int PREC = 6; // number of decimals for printed floats (cleaner, consistent output)
-    Serial.print(r.temp1, PREC); Serial.print(",");
-    Serial.print(r.temp2, PREC); Serial.print(",");
-    Serial.print(r.temp3, PREC); Serial.print(",");
-    Serial.print(r.voltage, PREC); Serial.print(",");
-    Serial.print(r.current, PREC); Serial.print(",");
-    Serial.print(f.temperature, PREC); Serial.print(",");
-    Serial.print(f.voted_temperature, PREC); Serial.print(",");
-    Serial.print(f.i_mean_all, PREC); Serial.print(",");
-    Serial.print(f.v_mean_all, PREC); Serial.print(",");
-    Serial.print(f.i_v_ratio_10, PREC); Serial.print(",");
-    Serial.print(f.power_mean_10, PREC); Serial.print(",");
-    Serial.print(f.power_prev, PREC); Serial.print(",");
-    Serial.println(f.capacity, PREC);
+  Serial.print("DATA,");
+  const int PREC = 6;
+  Serial.print(r.temp1, PREC); Serial.print(",");
+  Serial.print(r.temp2, PREC); Serial.print(",");
+  Serial.print(r.temp3, PREC); Serial.print(",");
+  Serial.print(r.voltage, PREC); Serial.print(",");
+  Serial.print(r.current, PREC); Serial.print(",");
+  Serial.print(f.temperature, PREC); Serial.print(",");
+  Serial.print(f.voted_temperature, PREC); Serial.print(",");
+  Serial.print(f.i_mean_all, PREC); Serial.print(",");
+  Serial.print(f.v_mean_all, PREC); Serial.print(",");
+  Serial.print(f.i_v_ratio_10, PREC); Serial.print(",");
+  Serial.print(f.power_mean_10, PREC); Serial.print(",");
+  Serial.print(f.power_prev, PREC); Serial.print(",");
+  Serial.println(f.capacity, PREC);
 }

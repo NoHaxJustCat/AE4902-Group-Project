@@ -15,7 +15,7 @@ url = "http://100.67.220.32:8086/" # O l'indirizzo del cloud
 
 # Configurazione Seriale (controlla la porta corretta su Arduino IDE)
 # Esempio Windows: 'COM3', Mac/Linux: '/dev/tty.usbmodem...'
-ser = serial.Serial('COM3', 115200, timeout=1) # Nota: 115200 come nel tuo codice!
+ser = serial.Serial('COM4', 115200, timeout=1) # Nota: 115200 come nel tuo codice!
 time.sleep(2) # Attesa per reset Arduino
 
 # ensure serial buffer is clean and request AUTO mode on the device
@@ -78,14 +78,15 @@ t = threading.Thread(target=repl, daemon=True)
 t.start()
 
 # initialize InfluxDB client (graceful fallback)
+print("[DEBUG] Initializing InfluxDB client...")
 write_api = None
 try:
     client = InfluxDBClient(url=url, token=token, org=org)
     write_api = client.write_api(write_options=SYNCHRONOUS)
-    print("InfluxDB client ready")
+    print("[SUCCESS] InfluxDB client ready")
 except Exception as e:
     write_api = None
-    print("InfluxDB init failed, will skip writes:", e)
+    print("[ERROR] InfluxDB init failed, will skip writes:", e)
 
 float_re = re.compile(r'[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?')
 
@@ -120,6 +121,7 @@ while True:
             if len(tokens) >= 13:
                 try:
                     d = [float(x) for x in tokens[:13]]
+                    print(f"[DEBUG] Parsed DATA line: {len(d)} fields")
                 except ValueError:
                     d = None
 
@@ -127,11 +129,13 @@ while True:
             nums = float_re.findall(line)
             if len(nums) >= 13:
                 d = [float(x) for x in nums[:13]]
+                print(f"[DEBUG] Parsed numeric line: {len(d)} fields")
             else:
                 print("Log:", line)
                 continue
 
         try:
+            print(f"[DEBUG] Creating InfluxDB point with {len(d)} fields")
             point = Point("battery_analysis") \
                 .tag("device", "arduino_uno") \
                 .field("temp1", d[0]) \
@@ -149,10 +153,11 @@ while True:
                 .field("capacity", d[12])
 
             if write_api:
+                print("[DEBUG] Attempting to write to InfluxDB...")
                 write_api.write(bucket=bucket, org=org, record=point)
-                print("Data written to InfluxDB")
+                print("[SUCCESS] Data written to InfluxDB")
             else:
-                print("Readings:", d)
+                print("[WARNING] No write_api available. Readings:", d)
 
         except Exception as e:
-            print("Failed processing line:", line, e)
+            print("[ERROR] Failed processing line:", line, "Error:", e)
