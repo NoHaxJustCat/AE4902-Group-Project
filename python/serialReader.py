@@ -15,7 +15,7 @@ url = "http://100.67.220.32:8086/" # O l'indirizzo del cloud
 
 # Configurazione Seriale (controlla la porta corretta su Arduino IDE)
 # Esempio Windows: 'COM3', Mac/Linux: '/dev/tty.usbmodem...'
-ser = serial.Serial('COM4', 115200, timeout=1) # Nota: 115200 come nel tuo codice!
+ser = serial.Serial('COM6', 115200, timeout=1) # Nota: 115200 come nel tuo codice!
 time.sleep(2) # Attesa per reset Arduino
 
 # ensure serial buffer is clean and request AUTO mode on the device
@@ -90,6 +90,42 @@ except Exception as e:
 
 float_re = re.compile(r'[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?')
 
+# --------------- CRC-16/CCITT helper (must match the Arduino implementation) ---------------
+def crc16_ccitt(data: bytes) -> int: # computes CRC-16/CCITT (0x1021) with initial value 0xFFFF, no final XOR
+    crc = 0xFFFF
+    for byte in data:
+        crc ^= byte << 8
+        for _ in range(8):
+            if crc & 0x8000:
+                crc = (crc << 1) ^ 0x1021
+            else:
+                crc <<= 1
+            crc &= 0xFFFF          # keep 16-bit
+    return crc
+
+def verify_crc(line: str):
+    """
+    Verify the CRC-16 checksum appended to a DATA line.
+    Expected format:  DATA,...fields...*XXXX
+    Returns the payload (without *XXXX) on success, or None on failure.
+    """
+    idx = line.rfind('*')
+    if idx == -1:
+        print("[CRC] No checksum found – discarding line")
+        return None
+    payload = line[:idx]
+    hex_crc = line[idx+1:]
+    try:
+        received_crc = int(hex_crc, 16) # convert hex string to int
+    except ValueError:
+        print(f"[CRC] Invalid checksum format '{hex_crc}' – discarding line")
+        return None
+    computed_crc = crc16_ccitt(payload.encode('ascii', errors='replace'))
+    if computed_crc != received_crc:
+        print(f"[CRC] Mismatch! computed=0x{computed_crc:04X} received=0x{received_crc:04X} – discarding line")
+        return None
+    return payload
+
 # track device-reported status
 device_mode = None
 device_scenario = None
@@ -116,12 +152,17 @@ while True:
         # DATA lines (preferred) or any line with >=11 floats
         d = None
         if line.upper().startswith("DATA"):
-            parts = [p.strip() for p in line.split(",")]
+            # --- CRC verification ---
+            payload = verify_crc(line)
+            if payload is None:
+                continue            # corrupted → skip this reading
+
+            parts = [p.strip() for p in payload.split(",")]
             tokens = parts[1:] if parts[0].upper().startswith("DATA") else parts
             if len(tokens) >= 13:
                 try:
                     d = [float(x) for x in tokens[:13]]
-                    print(f"[DEBUG] Parsed DATA line: {len(d)} fields")
+                    print(f"[DEBUG] Parsed DATA line (CRC OK): {len(d)} fields")
                 except ValueError:
                     d = None
 
