@@ -176,5 +176,7 @@ void loop()
     Features f = getFeatures(readingsArray, lastFeatures, index);
     lastFeatures = f;
     ++index;
+
+    serialPrintReadings(readingsArray[0], lastFeatures);
   }
 }

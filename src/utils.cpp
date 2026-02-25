@@ -15,7 +15,8 @@ float computeArrayMean(float arr[], int size)
 
 // Voter implementation with threshold filtering:
 // - exclude readings outside of [MIN_TEMP, MAX_TEMP]
-// - if >=2 valid readings: choose the two with smallest difference and return their average
+// - if 3 valid readings: return their average
+// - if 2 valid readings: choose the two with smallest difference and return their average
 // - if 1 valid reading: return that value
 // - if none valid: return sentinel -999.0f
 float votedTemperature(float t1, float t2, float t3)
@@ -39,28 +40,11 @@ float votedTemperature(float t1, float t2, float t3)
     // find pair among valid[] with smallest absolute difference
     float best_a = valid[0], best_b = valid[1];
     float best_d = fabsf(best_a - best_b);
-    if (vcount == 3)
-    {
-      float d01 = fabsf(valid[0] - valid[1]);
-      float d02 = fabsf(valid[0] - valid[2]);
-      float d12 = fabsf(valid[1] - valid[2]);
-      if (d01 <= d02 && d01 <= d12)
-      {
-        best_a = valid[0];
-        best_b = valid[1];
-      }
-      else if (d02 <= d01 && d02 <= d12)
-      {
-        best_a = valid[0];
-        best_b = valid[2];
-      }
-      else
-      {
-        best_a = valid[1];
-        best_b = valid[2];
-      }
-    }
     return (best_a + best_b) * 0.5f;
+  }
+  else if (vcount == 3)
+  {
+    return (t1 + t2 + t3) / 3.0f;
   }
 
   if (vcount == 1)
