@@ -5,7 +5,7 @@ typedef int16_t int16;
 typedef int32_t int32;
 extern "C"
 {
-#include "random_forest_boring.h"
+#include "random_forest.h"
 }
 
 // ============================================================================
@@ -24,9 +24,6 @@ const int PIN_RELAY = A1;
 
 static const float BASE_CAPACITY = 4.2f;
 static const int16_t BASE_CAPACITY_Q = (int16_t)(BASE_CAPACITY * CAP_SCALE);
-static SensorReadings readingsArray[10] = {};
-static int index = 0;
-static Features lastFeatures = {};
 static unsigned long sampling_period = 1000;
 static unsigned long lastSampleTime = 0;
 // ============================================================================
@@ -76,16 +73,16 @@ inline int32_t quantize_feature_int32(float value, float scale)
 // CAPACITY CALCULATION (Model Inference)
 // ============================================================================
 
-static float calculateCapacity(SensorReadings readings[])
+static float calculateCapacity(SensorReadings readings)
 {
   // Feature array - using int32_t to accommodate mixed precision
   // emlearn with dtype='int32' expects int32_t array
   int32_t x_i[NUM_FEATURES];
 
   // Get current sensor readings
-  float current_voltage = readings[0].voltage;
-  float current_current = readings[0].current;
-  float current_temp = votedTemperature(readings[0].temp1, readings[0].temp2, readings[0].temp3);
+  float current_voltage = readings.voltage;
+  float current_current = readings.current;
+  float current_temp = votedTemperature(readings.temp1, readings.temp2, readings.temp3);
 
   // Quantize features in the EXACT order expected by the model:
   // 1. Temp_ewma_q      (int16)
@@ -119,50 +116,6 @@ static float calculateCapacity(SensorReadings readings[])
 // ============================================================================
 // FEATURE EXTRACTION (for other purposes, not used in model)
 // ============================================================================
-
-Features getFeatures(SensorReadings readingsArray[], Features oldFeatures, int i)
-{
-  Features features = {};
-  features.time = millis() / 1000.0f;
-  features.capacity = calculateCapacity(readingsArray);
-  features.temperature = (readingsArray[0].temp1 + readingsArray[0].temp2 + readingsArray[0].temp3) / 3.0f;
-  features.voted_temperature = votedTemperature(readingsArray[0].temp1, readingsArray[0].temp2, readingsArray[0].temp3);
-
-  int prev_count = (i > 0) ? i : 0;
-
-  if (prev_count == 0 || oldFeatures.count_all <= 0)
-  {
-    features.i_mean_all = readingsArray[0].current;
-    features.v_mean_all = readingsArray[0].voltage;
-  }
-  else
-  {
-    features.i_mean_all = (oldFeatures.i_mean_all * prev_count + readingsArray[0].current) / (prev_count + 1);
-    features.v_mean_all = (oldFeatures.v_mean_all * prev_count + readingsArray[0].voltage) / (prev_count + 1);
-  }
-
-  int valid_samples = (prev_count + 1 < 10) ? prev_count + 1 : 10;
-  float iv[10], power_vals[10];
-  int iv_count = 0, power_count = 0;
-
-  for (int k = 0; k < valid_samples; ++k)
-  {
-    float v = readingsArray[k].voltage;
-    float c = readingsArray[k].current;
-    if (v != 0.0f)
-      iv[iv_count++] = c / v;
-    if (v != 0.0f || c != 0.0f)
-      power_vals[power_count++] = v * c;
-  }
-
-  features.i_v_ratio_10 = computeArrayMean(iv, iv_count);
-  features.power_mean_10 = computeArrayMean(power_vals, power_count);
-  features.power_prev = (prev_count >= 1) ? (readingsArray[1].voltage * readingsArray[1].current) : 0.0f;
-  features.count_all = prev_count + 1;
-  features.i_v_ratio = (readingsArray[0].voltage != 0.0f) ? (readingsArray[0].current / readingsArray[0].voltage) : 0.0f;
-
-  return features;
-}
 
 // ============================================================================
 // MAIN PROGRAM
@@ -226,13 +179,10 @@ void loop()
 
     SensorReadings r = getHardwareReadings();
 
-    // Shift array
-    for (int j = 9; j > 0; --j)
-      readingsArray[j] = readingsArray[j - 1];
-    readingsArray[0] = r;
-
     float current_temp = votedTemperature(r.temp1, r.temp2, r.temp3);
-    // spare_code.ino and main .ino
-    checkThermalSafety(current_temp, r.current, r.voltage); // float current_temp = (readings[0].temp1 + readings[0].temp2 + readings[0].temp3) / 3.0f;
+
+    serialPrintReadings(r, current_temp, calculateCapacity(r)); // Pass current_temp and capacity to serial print
+                                                                // spare_code.ino and main .ino
+    checkThermalSafety(current_temp, r.current, r.voltage);     // float current_temp = (readings[0].temp1 + readings[0].temp2 + readings[0].temp3) / 3.0f;
   }
 }
